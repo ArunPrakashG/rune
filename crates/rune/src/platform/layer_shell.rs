@@ -12,6 +12,7 @@ use std::time::Duration;
 use winit::raw_window_handle::{RawDisplayHandle, RawWindowHandle, WaylandDisplayHandle, WaylandWindowHandle};
 use wayland_backend::client::Backend;
 use wayland_client::globals::{GlobalListContents, registry_queue_init};
+use wayland_client::protocol::wl_callback::{self, WlCallback};
 use wayland_client::protocol::wl_compositor::WlCompositor;
 use wayland_client::protocol::wl_region::WlRegion;
 use wayland_client::protocol::wl_registry::WlRegistry;
@@ -32,6 +33,9 @@ use crate::el::Align;
 use crate::overlay::{Placement, ScreenEdge};
 use crate::runtime::Waker;
 use crate::{OverlayInput, OverlayOptions, OverlayPlacement};
+
+/// How long a surface waits for its frame callback before it draws without one.
+const FRAME_WAIT: Duration = Duration::from_millis(50);
 
 pub(crate) enum Input {
     Move(f32, f32), Leave, Button(bool), Secondary(bool), Key(crate::KeyEvent), KeyUp(crate::KeyEvent),
@@ -89,6 +93,9 @@ struct State {
     shown: Option<crate::el::Cursor>,
     keyboard: Option<WlKeyboard>,
     xkb: Option<xkbcommon::xkb::State>,
+    /// When the frame callback asked for with the last present was requested, until the
+    /// compositor reports that frame done.
+    frame_asked: Option<std::time::Instant>,
 }
 
 impl Dispatch<WlOutput, ()> for State {
@@ -314,6 +321,13 @@ impl Dispatch<WlSurface, ()> for State {
     fn event(state: &mut Self, _: &WlSurface, event: wl_surface::Event, _: &(), _: &Connection, _: &QueueHandle<Self>) {
         if let wl_surface::Event::PreferredBufferScale { factor } = event {
             state.scale = Some(factor.max(1));
+        }
+    }
+}
+impl Dispatch<WlCallback, ()> for State {
+    fn event(state: &mut Self, _: &WlCallback, event: wl_callback::Event, _: &(), _: &Connection, _: &QueueHandle<Self>) {
+        if let wl_callback::Event::Done { .. } = event {
+            state.frame_asked = None;
         }
     }
 }
@@ -593,6 +607,21 @@ impl LayerSurface {
     pub fn commit(&mut self) {
         self.surface.commit();
         let _ = self.queue.flush();
+    }
+
+    /// Asks the compositor to say when the frame about to be presented is done, so the next one
+    /// starts from there instead of from this surface's own vsync wait: one thread draws every
+    /// surface, and a blocked acquire on a slow output would hold up a fast one.
+    pub fn request_frame(&mut self) {
+        self.surface.frame(&self.queue.handle(), ());
+        self.state.frame_asked = Some(std::time::Instant::now());
+        let _ = self.queue.flush();
+    }
+
+    /// When the wait for the last frame's callback gives up, while the surface is still waiting
+    /// on it. A surface the compositor isn't drawing (its output asleep) never gets one.
+    pub fn frame_deadline(&self) -> Option<std::time::Instant> {
+        self.state.frame_asked.map(|asked| asked + FRAME_WAIT)
     }
 
     pub fn set_buffer_scale(&mut self, scale: i32) {

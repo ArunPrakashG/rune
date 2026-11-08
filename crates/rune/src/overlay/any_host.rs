@@ -26,6 +26,12 @@ impl<T: 'static> AnyHost for Overlay<T> {
         // A Windows fade-out steps its alpha once a frame.
         #[cfg(target_os = "windows")]
         let deadline = deadline.into_iter().chain(self.fading_out.map(|end| end.min(Instant::now() + crate::window::TIMER_FRAME))).min();
+        // A layer surface waiting on its frame callback gives up after a while.
+        #[cfg(all(unix, not(target_os = "macos"), not(target_os = "ios"), not(target_os = "android")))]
+        let deadline = deadline.into_iter().chain(match self.live.as_ref().map(|l| &l.backing) {
+            Some(Backing::Layer(layer)) if self.dirty || !self.idle => layer.frame_deadline(),
+            _ => None,
+        }).min();
         deadline.into_iter().chain(self.retry.filter(|_| self.drawing())).chain(self.fading_out)
             .chain(self.hidden_pace.deadline().filter(|_| !self.drawing()))
             .chain(self.release_at.filter(|_| !self.drawing())).min()

@@ -120,6 +120,13 @@ impl<T: 'static> Overlay<T> {
         if !self.dirty && self.idle { return false; }
         // Input waits for the retry too; `wake_due` runs due timers meanwhile.
         if !prewarm && self.backing_off(Instant::now()) { return false; }
+        // Draw when the compositor is done with the last frame, not before: the callback wakes
+        // the loop, so a surface mid-animation costs the others nothing while it waits.
+        #[cfg(all(unix, not(target_os = "macos"), not(target_os = "ios"), not(target_os = "android")))]
+        if !prewarm && let Some(Live { backing: Backing::Layer(layer), .. }) = &self.live
+            && layer.frame_deadline().is_some_and(|due| due > Instant::now()) {
+            return false;
+        }
         if !prewarm { self.retry = None; }
         let (Some(live), Some(renderer), Some(gpu)) = (self.live.as_mut(), self.renderer.as_mut(), self.gpu.as_ref()) else {
             return false;
@@ -258,6 +265,8 @@ impl<T: 'static> Overlay<T> {
         if let Some(alpha) = &live.alpha {
             alpha.draw(&mut enc, &view);
         }
+        #[cfg(all(unix, not(target_os = "macos"), not(target_os = "ios"), not(target_os = "android")))]
+        if !prewarm && let Backing::Layer(layer) = &mut live.backing { layer.request_frame(); }
         frame::submit_and_present(live, renderer, gpu, &self.rt, enc, frame, prewarm);
         crate::render::gpu_events::presented();
         if !prewarm { self.meter.presented(); }
