@@ -1302,6 +1302,14 @@ impl El {
         self.children.push(child);
         self
     }
+    /// Replaces each direct child with `f(index, child)`, for decorating a built subtree, such as
+    /// staggering the rows of a panel another module assembled.
+    pub fn map_children(mut self, mut f: impl FnMut(usize, El) -> El) -> Self {
+        self.memo_built = None;
+        self.children = std::mem::take(&mut self.children).into_iter().enumerate().map(|(i, c)| f(i, c)).collect();
+        self.has_virtual = self.children.iter().any(|c| c.has_virtual);
+        self
+    }
     pub fn children(mut self, children: impl IntoIterator<Item = El>) -> Self {
         self.memo_built = None;
         let start = self.children.len();
