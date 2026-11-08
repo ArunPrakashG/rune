@@ -621,6 +621,9 @@ impl LayerSurface {
     }
 
     pub fn commit(&mut self) {
+        // A lock surface commits only with a buffer: a role-state commit that races ahead of the
+        // first frame is a null-buffer protocol error, and the compositor kills the lock.
+        if matches!(self.layer, Role::Lock(_)) { return; }
         self.surface.commit();
         let _ = self.queue.flush();
     }
