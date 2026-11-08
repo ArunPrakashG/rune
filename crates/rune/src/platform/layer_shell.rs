@@ -467,7 +467,10 @@ impl LayerSurface {
         let watch = wake.map(|wake| Watch::spawn(conn.backend().poll_fd().as_raw_fd(), wake));
         let mut this = LayerSurface { registry, seat_global, regions: std::cell::RefCell::new(Some(Vec::new())), compositor, output, seat, options: options.clone(), queue, state, layer, surface, display: display.display, watch };
         this.place(at);
-        this.surface.commit();
+        // A lock surface is configured without any commit; one without a buffer is a protocol error.
+        if !matches!(this.layer, Role::Lock(_)) {
+            this.surface.commit();
+        }
         while this.state.configured.is_none() && !this.state.closed {
             this.queue.blocking_dispatch(&mut this.state).ok()?;
         }
