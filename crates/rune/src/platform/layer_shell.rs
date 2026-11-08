@@ -20,6 +20,11 @@ use wayland_client::protocol::{wl_output::{self, WlOutput}, wl_seat::{self, WlSe
 use wayland_client::{Connection, Dispatch, EventQueue, Proxy, QueueHandle};
 use wayland_protocols::wp::cursor_shape::v1::client::wp_cursor_shape_device_v1::{Shape, WpCursorShapeDeviceV1};
 use wayland_protocols::wp::cursor_shape::v1::client::wp_cursor_shape_manager_v1::WpCursorShapeManagerV1;
+use wayland_protocols::ext::session_lock::v1::client::{
+    ext_session_lock_manager_v1::ExtSessionLockManagerV1,
+    ext_session_lock_surface_v1::{self, ExtSessionLockSurfaceV1},
+    ext_session_lock_v1::{self, ExtSessionLockV1},
+};
 use wayland_protocols_wlr::layer_shell::v1::client::zwlr_layer_shell_v1::{Layer, ZwlrLayerShellV1};
 use wayland_protocols_wlr::layer_shell::v1::client::zwlr_layer_surface_v1::{self, Anchor, KeyboardInteractivity, ZwlrLayerSurfaceV1};
 
@@ -31,6 +36,31 @@ use crate::{OverlayInput, OverlayOptions, OverlayPlacement};
 pub(crate) enum Input {
     Move(f32, f32), Leave, Button(bool), Secondary(bool), Key(crate::KeyEvent), KeyUp(crate::KeyEvent),
     Physical(crate::PhysicalInput, Option<crate::KeyEvent>),
+}
+
+/// The one session lock every lock surface of this process shares, and the connection that
+/// flushes it. `finished` is set when the compositor refuses or ends the lock.
+struct SessionLock {
+    lock: ExtSessionLockV1,
+    conn: Connection,
+    surfaces: usize,
+}
+static SESSION_LOCK: Mutex<Option<SessionLock>> = Mutex::new(None);
+static LOCK_FINISHED: AtomicBool = AtomicBool::new(false);
+
+/// Unlocks the session and lets the compositor show the desktop again. Call it once the user
+/// has authenticated, then hide the lock overlays.
+pub fn session_unlock() {
+    if let Some(l) = SESSION_LOCK.lock().unwrap().take() {
+        l.lock.unlock_and_destroy();
+        let _ = l.conn.flush();
+    }
+}
+
+/// The surface's role: a layer-shell surface, or a lock surface of the session lock.
+enum Role {
+    Layer(ZwlrLayerSurfaceV1),
+    Lock(ExtSessionLockSurfaceV1),
 }
 
 #[derive(Default)]
@@ -287,6 +317,22 @@ impl Dispatch<WlSurface, ()> for State {
         }
     }
 }
+impl Dispatch<ExtSessionLockManagerV1, ()> for State {
+    fn event(_: &mut Self, _: &ExtSessionLockManagerV1, _: <ExtSessionLockManagerV1 as Proxy>::Event, _: &(), _: &Connection, _: &QueueHandle<Self>) {}
+}
+impl Dispatch<ExtSessionLockV1, ()> for State {
+    fn event(_: &mut Self, _: &ExtSessionLockV1, event: ext_session_lock_v1::Event, _: &(), _: &Connection, _: &QueueHandle<Self>) {
+        if let ext_session_lock_v1::Event::Finished = event { LOCK_FINISHED.store(true, Ordering::SeqCst); }
+    }
+}
+impl Dispatch<ExtSessionLockSurfaceV1, ()> for State {
+    fn event(state: &mut Self, lock: &ExtSessionLockSurfaceV1, event: ext_session_lock_surface_v1::Event, _: &(), _: &Connection, _: &QueueHandle<Self>) {
+        if let ext_session_lock_surface_v1::Event::Configure { serial, width, height } = event {
+            lock.ack_configure(serial);
+            state.configured = Some((width, height));
+        }
+    }
+}
 impl Dispatch<ZwlrLayerSurfaceV1, ()> for State {
     fn event(state: &mut Self, layer: &ZwlrLayerSurfaceV1, event: zwlr_layer_surface_v1::Event, _: &(), _: &Connection, _: &QueueHandle<Self>) {
         match event {
@@ -362,7 +408,7 @@ pub(crate) struct LayerSurface {
     options: OverlayOptions,
     queue: EventQueue<State>,
     state: State,
-    layer: ZwlrLayerSurfaceV1,
+    layer: Role,
     surface: WlSurface,
     display: NonNull<std::ffi::c_void>,
     watch: Option<Watch>,
@@ -379,7 +425,8 @@ impl LayerSurface {
         let (globals, queue) = registry_queue_init::<State>(&conn).ok()?;
         let qh = queue.handle();
         let compositor: WlCompositor = globals.bind(&qh, 1..=6, ()).ok()?;
-        let shell: ZwlrLayerShellV1 = globals.bind(&qh, 1..=4, ()).ok()?;
+        let locking = options.wayland_layer == crate::WaylandLayer::SessionLock;
+        let shell: Option<ZwlrLayerShellV1> = if locking { None } else { Some(globals.bind(&qh, 1..=4, ()).ok()?) };
         let output = output_id.and_then(|id| {
             globals.contents().with_list(|list| list.iter().find(|g| g.name == id && g.interface == "wl_output").map(|g| {
                 globals.registry().bind::<WlOutput, _, _>(g.name, g.version.min(4), &qh, ())
@@ -396,10 +443,25 @@ impl LayerSurface {
         region.destroy();
         // Preserve existing overlay-layer semantics. There is no layer above Overlay;
         // relative ordering of peers is compositor policy, unlike AppKit's numeric levels.
-        let wl_layer = match options.wayland_layer { crate::WaylandLayer::Overlay => Layer::Overlay, crate::WaylandLayer::Top => Layer::Top };
-        let layer = shell.get_layer_surface(&surface, output.as_ref(), wl_layer, namespace.to_owned(), &qh, ());
-        layer.set_keyboard_interactivity(KeyboardInteractivity::None);
-        layer.set_exclusive_zone(options.exclusive_zone);
+        let layer = if let Some(shell) = &shell {
+            let wl_layer = match options.wayland_layer { crate::WaylandLayer::Top => Layer::Top, _ => Layer::Overlay };
+            let layer = shell.get_layer_surface(&surface, output.as_ref(), wl_layer, namespace.to_owned(), &qh, ());
+            layer.set_keyboard_interactivity(KeyboardInteractivity::None);
+            layer.set_exclusive_zone(options.exclusive_zone);
+            Role::Layer(layer)
+        } else {
+            let output = output.as_ref()?;
+            let mut held = SESSION_LOCK.lock().unwrap();
+            if held.is_none() {
+                LOCK_FINISHED.store(false, Ordering::SeqCst);
+                let manager: ExtSessionLockManagerV1 = globals.bind(&qh, 1..=1, ()).ok()?;
+                *held = Some(SessionLock { lock: manager.lock(&qh, ()), conn: conn.clone(), surfaces: 0 });
+                manager.destroy();
+            }
+            let l = held.as_mut()?;
+            l.surfaces += 1;
+            Role::Lock(l.lock.get_lock_surface(&surface, output, &qh, ()))
+        };
         let shapes = globals.bind::<WpCursorShapeManagerV1, _, _>(&qh, 1..=1, ()).ok();
         let state = State { surface: Some(surface.clone()), want_pointer, want_keys, shapes, ..State::default() };
         let watch = wake.map(|wake| Watch::spawn(conn.backend().poll_fd().as_raw_fd(), wake));
@@ -413,17 +475,18 @@ impl LayerSurface {
     }
 
     pub fn place(&mut self, at: Placement) {
+        let Role::Layer(layer) = &self.layer else { return };
         match self.options.placement {
             Some(OverlayPlacement::FullScreen) => {
-                self.layer.set_size(0, 0);
-                self.layer.set_anchor(Anchor::Top | Anchor::Bottom | Anchor::Left | Anchor::Right);
-                self.layer.set_margin(0, 0, 0, 0);
+                layer.set_size(0, 0);
+                layer.set_anchor(Anchor::Top | Anchor::Bottom | Anchor::Left | Anchor::Right);
+                layer.set_margin(0, 0, 0, 0);
                 return;
             }
             Some(OverlayPlacement::Rect { x, y, width, height }) => {
-                self.layer.set_size(width.ceil().max(1.0) as u32, height.ceil().max(1.0) as u32);
-                self.layer.set_anchor(Anchor::Top | Anchor::Left);
-                self.layer.set_margin(y.round() as i32, 0, 0, x.round() as i32);
+                layer.set_size(width.ceil().max(1.0) as u32, height.ceil().max(1.0) as u32);
+                layer.set_anchor(Anchor::Top | Anchor::Left);
+                layer.set_margin(y.round() as i32, 0, 0, x.round() as i32);
                 return;
             }
             _ => {}
@@ -442,9 +505,9 @@ impl LayerSurface {
             Align::Center => (Anchor::empty(), 0, 0),
             Align::End => (Anchor::Right, 0, inset),
         };
-        self.layer.set_size(at.size.0.ceil() as u32, at.size.1.ceil() as u32);
-        self.layer.set_anchor(vertical | horizontal);
-        self.layer.set_margin(top, right, bottom, left);
+        layer.set_size(at.size.0.ceil() as u32, at.size.1.ceil() as u32);
+        layer.set_anchor(vertical | horizontal);
+        layer.set_margin(top, right, bottom, left);
     }
 
     pub fn configured_size(&self) -> Option<(u32, u32)> { self.state.configured }
@@ -485,14 +548,18 @@ impl LayerSurface {
     }
 
     pub fn request_keys(&self) -> bool {
-        if self.layer.version() < 4 { return false; }
-        self.layer.set_keyboard_interactivity(KeyboardInteractivity::OnDemand);
+        // A lock surface already holds keyboard focus.
+        let Role::Layer(layer) = &self.layer else { return true };
+        if layer.version() < 4 { return false; }
+        layer.set_keyboard_interactivity(KeyboardInteractivity::OnDemand);
         self.surface.commit();
         let _ = self.queue.flush();
         true
     }
 
-    pub fn supports_keys(&self) -> bool { self.layer.version() >= 4 && self.seat.is_some() }
+    pub fn supports_keys(&self) -> bool {
+        match &self.layer { Role::Layer(layer) => layer.version() >= 4 && self.seat.is_some(), Role::Lock(_) => self.seat.is_some() }
+    }
 
     /// Shows `want` while the pointer is over the surface, once per change. Without
     /// cursor-shape-v1 only `Cursor::Hidden` applies; others keep the cursor the pointer
@@ -524,7 +591,7 @@ impl LayerSurface {
     /// Handles what the compositor sent since the last call (winit reads the socket).
     pub fn dispatch(&mut self) -> Changes {
         self.turn();
-        Changes { size: self.state.configured.take(), input: std::mem::take(&mut self.state.input), scale: self.state.scale.take(), closed: self.state.closed }
+        Changes { size: self.state.configured.take(), input: std::mem::take(&mut self.state.input), scale: self.state.scale.take(), closed: self.state.closed || self.lost_lock() }
     }
 
     /// Handles what the compositor sent to a hidden surface and drops its input, keeping size
@@ -534,8 +601,11 @@ impl LayerSurface {
     pub fn drain(&mut self) -> bool {
         self.turn();
         self.state.input.clear();
-        self.state.closed
+        self.state.closed || self.lost_lock()
     }
+
+    /// The compositor ended the session lock this surface belongs to.
+    fn lost_lock(&self) -> bool { matches!(self.layer, Role::Lock(_)) && LOCK_FINISHED.load(Ordering::SeqCst) }
 
     fn turn(&mut self) {
         let _ = self.queue.dispatch_pending(&mut self.state);
@@ -561,7 +631,13 @@ impl Drop for LayerSurface {
         if let Some(keyboard) = self.state.keyboard.take() && keyboard.version() >= 3 { keyboard.release(); }
         if let Some(seat) = self.seat.take() && seat.version() >= 5 { seat.release(); }
         if let Some(output) = self.output.take() && output.version() >= 3 { output.release(); }
-        self.layer.destroy();
+        match &self.layer {
+            Role::Layer(layer) => layer.destroy(),
+            Role::Lock(lock) => {
+                lock.destroy();
+                if let Some(l) = SESSION_LOCK.lock().unwrap().as_mut() { l.surfaces = l.surfaces.saturating_sub(1); }
+            }
+        }
         self.surface.destroy();
         let _ = self.queue.flush();
     }

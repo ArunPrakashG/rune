@@ -202,6 +202,9 @@ pub use overlay::options::OverlayCreated;
 pub use overlay::options::OverlayInput;
 pub use overlay::options::OverlayLevel;
 pub use overlay::options::WaylandLayer;
+/// Unlocks the session lock that `WaylandLayer::SessionLock` overlays took (Wayland only).
+#[cfg(all(unix, not(target_os = "macos")))]
+pub use platform::layer_shell::session_unlock;
 pub use overlay::options::OverlayOptions;
 pub use overlay::options::OverlayPlacement;
 pub use overlay::options::OverlaySupport;

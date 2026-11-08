@@ -78,6 +78,10 @@ pub enum WaylandLayer {
     Overlay,
     /// Above windows, below fullscreen: where a bar or dock lives.
     Top,
+    /// The surface is an `ext-session-lock-v1` lock surface for its display: it locks the
+    /// session while shown, covers the display, and stays until `session_unlock`. Show one per
+    /// display; a display left uncovered stays blank under the compositor's own lock colour.
+    SessionLock,
 }
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
