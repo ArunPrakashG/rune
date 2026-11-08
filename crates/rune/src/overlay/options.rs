@@ -70,6 +70,16 @@ pub enum OverlayLevel {
     AboveOverlays,
 }
 
+/// The layer-shell layer a Wayland overlay lives on. Other platforms ignore it.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum WaylandLayer {
+    /// Above everything, like a HUD.
+    #[default]
+    Overlay,
+    /// Above windows, below fullscreen: where a bar or dock lives.
+    Top,
+}
+
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub enum KeyPolicy {
     #[default]
@@ -109,6 +119,11 @@ pub struct OverlayOptions {
     /// Re-resolve UnderPointer while visible. Unsupported on Wayland.
     pub follow_pointer: bool,
     pub level: OverlayLevel,
+    /// Wayland only: the layer-shell layer.
+    pub wayland_layer: WaylandLayer,
+    /// Wayland only: pixels of the screen edge this overlay reserves, so windows tile around
+    /// it. Zero reserves nothing; -1 asks to sit under other surfaces' zones.
+    pub exclusive_zone: i32,
     /// Native best effort, not a security boundary. Use the window number in capture filters.
     /// Applies only while shown, including the exit fade. On macOS, hidden panels order out
     /// before restoring sharing, even when prewarmed: alpha zero and a sharing reset alone

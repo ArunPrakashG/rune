@@ -201,6 +201,7 @@ pub use overlay::options::OverlayCapabilities;
 pub use overlay::options::OverlayCreated;
 pub use overlay::options::OverlayInput;
 pub use overlay::options::OverlayLevel;
+pub use overlay::options::WaylandLayer;
 pub use overlay::options::OverlayOptions;
 pub use overlay::options::OverlayPlacement;
 pub use overlay::options::OverlaySupport;
