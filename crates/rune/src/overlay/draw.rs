@@ -35,6 +35,7 @@ impl<T: 'static> Overlay<T> {
                 if down { self.rt.pointer_down(x, y); } else { self.rt.pointer_up(x, y); }
             },
             Input::Secondary(down) => if let Some((x, y)) = self.rt.pointer() { if down { self.rt.secondary_down(x, y) } else { self.rt.secondary_up(x, y) } },
+            Input::Wheel(dx, dy) => if let Some((x, y)) = self.rt.pointer() { self.rt.wheel_xy(x, y, dx, dy); },
             Input::Key(key) => self.rt.key(key),
             Input::KeyUp(key) => {
                 self.dirty |= self.rt.key_up(key);

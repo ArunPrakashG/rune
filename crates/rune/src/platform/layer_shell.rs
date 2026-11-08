@@ -40,6 +40,8 @@ const FRAME_WAIT: Duration = Duration::from_millis(50);
 pub(crate) enum Input {
     Move(f32, f32), Leave, Button(bool), Secondary(bool), Key(crate::KeyEvent), KeyUp(crate::KeyEvent),
     Physical(crate::PhysicalInput, Option<crate::KeyEvent>),
+    /// A wheel or trackpad delta in points, positive moving content right and down.
+    Wheel(f32, f32),
 }
 
 /// The one session lock every lock surface of this process shares, and the connection that
@@ -96,6 +98,9 @@ struct State {
     /// When the frame callback asked for with the last present was requested, until the
     /// compositor reports that frame done.
     frame_asked: Option<std::time::Instant>,
+    /// Whether the axis events being read come from a wheel, which reports 15 points a notch,
+    /// and not a trackpad or finger, which report the distance moved.
+    axis_wheel: bool,
 }
 
 impl Dispatch<WlOutput, ()> for State {
@@ -156,6 +161,17 @@ impl Dispatch<WlPointer, ()> for State {
                 }
             }
             // BTN_RIGHT: the secondary gesture, as a window's right button is.
+            wl_pointer::Event::AxisSource { axis_source } => state.axis_wheel = matches!(axis_source, wayland_client::WEnum::Value(wl_pointer::AxisSource::Wheel | wl_pointer::AxisSource::WheelTilt)),
+            wl_pointer::Event::Axis { axis: wayland_client::WEnum::Value(axis), value, .. } if state.pointer_inside => {
+                // A wheel notch is 15 points here and 40 in a window (`LineDelta`), so it
+                // scrolls the same distance on either.
+                let points = if state.axis_wheel { value as f32 * 40.0 / 15.0 } else { value as f32 };
+                // Wayland counts down and right as positive; the runtime counts content moving that way.
+                state.input.push(match axis {
+                    wl_pointer::Axis::HorizontalScroll => Input::Wheel(-points, 0.0),
+                    _ => Input::Wheel(0.0, -points),
+                });
+            }
             wl_pointer::Event::Button { button: 0x111, state: wayland_client::WEnum::Value(button), .. } if state.pointer_inside => {
                 state.input.push(Input::Secondary(button == wl_pointer::ButtonState::Pressed));
             }
