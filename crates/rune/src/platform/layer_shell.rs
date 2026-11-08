@@ -580,6 +580,16 @@ impl LayerSurface {
     }
 
     /// Commit role state (placement) without a new buffer; wgpu's present commits buffers.
+    /// Reserves `zone` points of the screen edge from now on.
+    pub fn set_exclusive_zone(&mut self, zone: i32) {
+        self.options.exclusive_zone = zone;
+        if let Role::Layer(layer) = &self.layer {
+            layer.set_exclusive_zone(zone);
+            self.surface.commit();
+            let _ = self.queue.flush();
+        }
+    }
+
     pub fn commit(&mut self) {
         self.surface.commit();
         let _ = self.queue.flush();

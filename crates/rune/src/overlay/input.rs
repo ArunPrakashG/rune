@@ -324,6 +324,11 @@ impl<T: 'static> Overlay<T> {
         self.apply_input();
         if let Some(exclude) = requests.exclude_from_capture { self.set_capture_exclusion(exclude); }
         if let Some(allow) = requests.xwayland_input { self.options.xwayland_input = allow; }
+        if let Some(zone) = requests.exclusive_zone {
+            self.options.exclusive_zone = zone;
+            #[cfg(all(unix, not(target_os = "macos"), not(target_os = "ios"), not(target_os = "android")))]
+            if let Some(Live { backing: Backing::Layer(layer), .. }) = &mut self.live { layer.set_exclusive_zone(zone); }
+        }
         if let Some(follow) = requests.follow_pointer {
             self.options.follow_pointer = follow;
             #[cfg(target_os = "macos")]

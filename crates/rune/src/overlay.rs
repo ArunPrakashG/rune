@@ -152,6 +152,8 @@ impl<T: 'static> OverlayHandle<T> {
     /// None restores the spec's legacy edge placement.
     pub fn set_placement(&self, placement: Option<OverlayPlacement>) { self.request(|q| q.placement = Some(placement)); }
     pub fn set_display(&self, display: DisplayTarget) { self.request(|q| q.display = Some(display)); }
+    /// Wayland: changes how much of the screen edge the surface reserves, without recreating it.
+    pub fn set_exclusive_zone(&self, zone: i32) { self.request(|q| q.exclusive_zone = Some(zone)); }
 
     /// Request keyboard focus without application activation, where supported.
     pub fn request_keys(&self) { self.request(|q| q.request_keys = true); }
