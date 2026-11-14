@@ -213,11 +213,16 @@ impl Dispatch<WlKeyboard, ()> for State {
                 state.input.push(Input::Physical(crate::PhysicalInput::FocusLost, None));
             }
             wl_keyboard::Event::Keymap { format: wayland_client::WEnum::Value(wl_keyboard::KeymapFormat::XkbV1), fd, size } => {
-                use std::io::Read;
-                let mut map = String::new();
-                if size <= 16 * 1024 * 1024 && std::fs::File::from(fd).take(u64::from(size)).read_to_string(&mut map).is_ok() {
+                // Read from offset 0, never with read(): a compositor may send the same keymap fd
+                // again, and its shared offset would then sit at the end and yield an empty map.
+                // A map that doesn't parse keeps the one we have instead of dropping every key.
+                use std::os::unix::fs::FileExt;
+                let mut buf = vec![0u8; size as usize];
+                if size <= 16 * 1024 * 1024 && std::fs::File::from(fd).read_exact_at(&mut buf, 0).is_ok() && let Ok(map) = String::from_utf8(buf) {
                     let context = xkb::Context::new(xkb::CONTEXT_NO_FLAGS);
-                    state.xkb = xkb::Keymap::new_from_string(&context, map.trim_end_matches('\0').to_owned(), xkb::KEYMAP_FORMAT_TEXT_V1, xkb::COMPILE_NO_FLAGS).map(|map| xkb::State::new(&map));
+                    if let Some(map) = xkb::Keymap::new_from_string(&context, map.trim_end_matches('\0').to_owned(), xkb::KEYMAP_FORMAT_TEXT_V1, xkb::COMPILE_NO_FLAGS) {
+                        state.xkb = Some(xkb::State::new(&map));
+                    }
                 }
             }
             wl_keyboard::Event::Modifiers { mods_depressed, mods_latched, mods_locked, group, .. } => {
