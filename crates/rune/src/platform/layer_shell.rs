@@ -584,10 +584,20 @@ impl LayerSurface {
         // A lock surface already holds keyboard focus.
         let Role::Layer(layer) = &self.layer else { return true };
         if layer.version() < 4 { return false; }
-        layer.set_keyboard_interactivity(KeyboardInteractivity::OnDemand);
+        // Exclusive, not on-demand: Hyprland focuses an already mapped surface only when it
+        // turns exclusive, and an on-demand one only once it is clicked. `release_keys` undoes it.
+        layer.set_keyboard_interactivity(KeyboardInteractivity::Exclusive);
         self.surface.commit();
         let _ = self.queue.flush();
         true
+    }
+
+    /// Gives keyboard focus back to the compositor, which refocuses the window it came from.
+    pub fn release_keys(&self) {
+        let Role::Layer(layer) = &self.layer else { return };
+        layer.set_keyboard_interactivity(KeyboardInteractivity::None);
+        self.surface.commit();
+        let _ = self.queue.flush();
     }
 
     pub fn supports_keys(&self) -> bool {

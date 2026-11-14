@@ -156,7 +156,10 @@ impl<T: 'static> OverlayHandle<T> {
     pub fn set_exclusive_zone(&self, zone: i32) { self.request(|q| q.exclusive_zone = Some(zone)); }
 
     /// Request keyboard focus without application activation, where supported.
-    pub fn request_keys(&self) { self.request(|q| q.request_keys = true); }
+    pub fn request_keys(&self) { self.request(|q| q.keys = Some(true)); }
+    /// Gives keyboard focus back after `request_keys`. Wayland layer surfaces hold it until
+    /// then; elsewhere it does nothing.
+    pub fn release_keys(&self) { self.request(|q| q.keys = Some(false)); }
 
     /// macOS panel CGWindowID for an explicit ScreenCaptureKit exclusion filter. Available
     /// at native creation (see `on_created`/`prewarm`); a new one with each window made.

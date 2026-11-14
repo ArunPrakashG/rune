@@ -410,10 +410,15 @@ impl<T: 'static> Overlay<T> {
             if let Some(x11) = &self.x11 { self.shared.native.lock().unwrap().1.global_pointer = x11.global_pointer(); }
         }
         #[cfg(target_os = "macos")]
-        if requests.request_keys && self.visible && self.options.keys == KeyPolicy::OnDemand
+        if requests.keys == Some(true) && self.visible && self.options.keys == KeyPolicy::OnDemand
             && let Some(panel) = &self.panel { panel.request_keys(); }
         #[cfg(all(unix, not(target_os = "macos"), not(target_os = "ios"), not(target_os = "android")))]
-        if requests.request_keys && self.visible && self.options.keys == KeyPolicy::OnDemand
-            && let Some(Live { backing: Backing::Layer(layer), .. }) = &self.live { layer.request_keys(); }
+        if let Some(Live { backing: Backing::Layer(layer), .. }) = &self.live {
+            match requests.keys {
+                Some(true) if self.visible && self.options.keys == KeyPolicy::OnDemand => { layer.request_keys(); }
+                Some(false) => layer.release_keys(),
+                _ => {}
+            }
+        }
     }
 }
