@@ -14,9 +14,24 @@ impl<T: LiveValue> Clone for Tween<T> {
 }
 impl<T: LiveValue> Tween<T> {
     pub fn linear(from: T, to: T, duration: std::time::Duration) -> Self {
+        Self::track(from, to, duration, None)
+    }
+    /// [`Self::linear`] eased on a CSS `cubic-bezier(x1, y1, x2, y2)` curve. A `y` outside 0 to
+    /// 1 overshoots: `[0.34, 1.42, 0.64, 1.0]` passes `to` and settles back onto it.
+    pub fn curve(from: T, to: T, duration: std::time::Duration, bezier: [f32; 4]) -> Self {
+        Self::track(from, to, duration, Some(bezier))
+    }
+    /// Holds `from` for `delay` after the track starts, then runs it. Call it before binding.
+    pub fn delay(mut self, delay: std::time::Duration) -> Self {
+        if let Some(linear) = Arc::get_mut(&mut self.live.source).and_then(|s| s.linear.as_mut()) {
+            linear.delay = delay.as_secs_f64();
+        }
+        self
+    }
+    fn track(from: T, to: T, duration: std::time::Duration, ease: Option<[f32; 4]>) -> Self {
         let mut live = Live::new(to);
         Arc::get_mut(&mut live.source).unwrap().linear = Some(Linear {
-            from: from.encode().unwrap_or(0), duration: duration.as_secs_f64(),
+            from: from.encode().unwrap_or(0), duration: duration.as_secs_f64(), delay: 0.0, ease,
             starts: Mutex::new(Vec::new()),
         });
         Self { live }
@@ -29,6 +44,8 @@ impl<T: LiveValue> From<&Tween<T>> for Binding<T> {
 struct Linear {
     from: u128,
     duration: f64,
+    delay: f64,
+    ease: Option<[f32; 4]>,
     // The shared Tween owns each runtime clock's start, even while no element binds it.
     // Weak clock identities also keep independent headless runs deterministic.
     starts: Mutex<Vec<(Weak<()>, f64)>>,
@@ -43,9 +60,12 @@ impl Linear {
         now
     }
     fn sample(&self, to: u128, elapsed: f64) -> (u128, bool) {
+        let elapsed = elapsed - self.delay;
+        if elapsed < 0.0 { return (self.from, true); }
         let t = if self.duration == 0.0 { 1.0 } else { (elapsed / self.duration).clamp(0.0, 1.0) };
         if t >= 1.0 { return (to, false); }
         if t == 0.0 { return (self.from, true); }
+        let t = match self.ease { Some(c) => cubic_bezier(c, t), None => t };
         let mut bits = 0;
         for lane in 0..4 {
             let a = f32::decode(self.from >> (32 * lane)) as f64;
@@ -54,6 +74,30 @@ impl Linear {
         }
         (bits, true)
     }
+}
+
+/// `y` at `x` on a CSS `cubic-bezier(x1, y1, x2, y2)` from (0, 0) to (1, 1).
+fn cubic_bezier([x1, y1, x2, y2]: [f32; 4], x: f64) -> f64 {
+    let (x1, y1, x2, y2) = (x1.clamp(0.0, 1.0) as f64, y1 as f64, x2.clamp(0.0, 1.0) as f64, y2 as f64);
+    let at = |a: f64, b: f64, t: f64| 3.0 * a * (1.0 - t) * (1.0 - t) * t + 3.0 * b * (1.0 - t) * t * t + t * t * t;
+    // x(t) rises monotonically on [0, 1], so bisection always finds it; Newton first, as browsers do.
+    let mut t = x;
+    for _ in 0..8 {
+        let dx = 3.0 * x1 * (1.0 - t) * (1.0 - t) + 6.0 * (x2 - x1) * (1.0 - t) * t + 3.0 * (1.0 - x2) * t * t;
+        let err = at(x1, x2, t) - x;
+        if err.abs() < 1e-6 { return at(y1, y2, t); }
+        if dx.abs() < 1e-6 { break; }
+        t = (t - err / dx).clamp(0.0, 1.0);
+    }
+    let (mut lo, mut hi) = (0.0, 1.0);
+    t = x;
+    for _ in 0..40 {
+        let v = at(x1, x2, t);
+        if (v - x).abs() < 1e-6 { break; }
+        if v < x { lo = t } else { hi = t }
+        t = (lo + hi) / 2.0;
+    }
+    at(y1, y2, t)
 }
 
 mod sealed { pub trait Sealed {} }
